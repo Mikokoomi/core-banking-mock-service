@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: ${CORE_BANKING_DB_URL}
+    username: ${CORE_BANKING_DB_USERNAME}
+    password: ${CORE_BANKING_DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+    validate-on-migrate: true

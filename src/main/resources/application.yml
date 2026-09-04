@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: core-banking-mock-service
+  profiles:
+    default: local
+
+server:
+  port: 8082
