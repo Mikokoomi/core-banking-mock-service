@@ -12,8 +12,14 @@ public class BankAccountController {
     private final BankAccountService service;
     public BankAccountController(BankAccountService service) { this.service = service; }
     @PostMapping
-    ResponseEntity<AccountResponse> create(@Valid @RequestBody CreateAccountRequest request) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(request));
+    ResponseEntity<AccountResponse> create(
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody CreateAccountRequest request) {
+        if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 200) {
+            throw new InvalidIdempotencyKeyException();
+        }
+        BankAccountService.CreateAccountResult result = service.create(idempotencyKey, request);
+        return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK).body(result.account());
     }
     @GetMapping("/{accountNumber}")
     AccountResponse get(@PathVariable String accountNumber) { return service.get(accountNumber); }

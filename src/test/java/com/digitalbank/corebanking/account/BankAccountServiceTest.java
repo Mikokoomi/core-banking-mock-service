@@ -1,10 +1,11 @@
 package com.digitalbank.corebanking.account;
 
 import com.digitalbank.corebanking.account.dto.*;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.*;
+import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import java.time.*;
 import java.util.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -14,24 +15,59 @@ import static org.mockito.Mockito.*;
 class BankAccountServiceTest {
     @Mock BankAccountRepository repository;
     Clock clock = Clock.fixed(Instant.parse("2026-09-04T02:00:00Z"), ZoneOffset.UTC);
-    @Test void createPersistsActiveAccountWithGeneratedNumber() {
-        when(repository.save(any())).thenAnswer(i -> { BankAccount a=i.getArgument(0); a.setAccountId(UUID.randomUUID()); return a; });
-        AccountResponse result = new BankAccountService(repository, clock).create(new CreateAccountRequest(UUID.randomUUID(), " CUS001 ", " CURRENT_ACCOUNT "));
-        assertTrue(result.accountNumber().startsWith("ACC-")); assertEquals(AccountStatus.ACTIVE, result.status());
-        assertEquals("CUS001", result.customerId()); assertEquals(OffsetDateTime.now(clock), result.openedAt());
+    @Test void firstRequestCreatesActiveAccount() {
+        when(repository.findByIdempotencyKey("KEY-1")).thenReturn(Optional.empty());
+        when(repository.findByApplicationId(any())).thenReturn(Optional.empty());
+        when(repository.saveAndFlush(any())).thenAnswer(i -> { BankAccount a=i.getArgument(0); a.setAccountId(UUID.randomUUID()); return a; });
+        var result = service().create(" KEY-1 ", new CreateAccountRequest(UUID.randomUUID(), " CUS001 ", " CURRENT_ACCOUNT "));
+        assertTrue(result.created()); assertTrue(result.account().accountNumber().startsWith("ACC-"));
+        assertEquals(AccountStatus.ACTIVE, result.account().status()); assertEquals("CUS001", result.account().customerId());
     }
-    @Test void duplicateApplicationIsRejected() {
-        UUID id=UUID.randomUUID(); when(repository.existsByApplicationId(id)).thenReturn(true);
-        assertThrows(AccountAlreadyExistsException.class, () -> new BankAccountService(repository, clock).create(new CreateAccountRequest(id,"CUS001","P")));
-        verify(repository, never()).save(any());
+    @Test void sameKeyAndPayloadReplaysSameAccount() {
+        BankAccount existing = account("KEY-1", UUID.randomUUID(), "CUS001", "P");
+        when(repository.findByIdempotencyKey("KEY-1")).thenReturn(Optional.of(existing));
+        var result = service().create("KEY-1", request(existing));
+        assertFalse(result.created()); assertEquals(existing.getAccountId(), result.account().accountId());
+        verify(repository, never()).saveAndFlush(any());
+    }
+    @Test void sameKeyDifferentPayloadConflicts() {
+        BankAccount existing = account("KEY-1", UUID.randomUUID(), "CUS001", "P");
+        when(repository.findByIdempotencyKey("KEY-1")).thenReturn(Optional.of(existing));
+        assertThrows(IdempotencyKeyConflictException.class, () -> service().create("KEY-1", new CreateAccountRequest(existing.getApplicationId(), "OTHER", "P")));
+    }
+    @Test void sameApplicationDifferentKeyConflicts() {
+        BankAccount existing = account("KEY-1", UUID.randomUUID(), "CUS001", "P");
+        when(repository.findByIdempotencyKey("KEY-2")).thenReturn(Optional.empty());
+        when(repository.findByApplicationId(existing.getApplicationId())).thenReturn(Optional.of(existing));
+        assertThrows(IdempotencyKeyConflictException.class, () -> service().create("KEY-2", request(existing)));
+    }
+    @Test void legacyRowIsBoundAndReplayed() {
+        BankAccount existing = account(null, UUID.randomUUID(), "CUS001", "P");
+        when(repository.findByIdempotencyKey("KEY-1")).thenReturn(Optional.empty());
+        when(repository.findByApplicationId(existing.getApplicationId())).thenReturn(Optional.of(existing));
+        when(repository.saveAndFlush(existing)).thenReturn(existing);
+        var result = service().create("KEY-1", request(existing));
+        assertFalse(result.created()); assertEquals("KEY-1", existing.getIdempotencyKey());
+    }
+    @Test void databaseUniquenessViolationBecomesConflict() {
+        UUID id=UUID.randomUUID(); when(repository.findByIdempotencyKey("KEY-1")).thenReturn(Optional.empty());
+        when(repository.findByApplicationId(id)).thenReturn(Optional.empty());
+        when(repository.saveAndFlush(any())).thenThrow(new DataIntegrityViolationException("unique"));
+        assertThrows(IdempotencyKeyConflictException.class, () -> service().create("KEY-1", new CreateAccountRequest(id,"CUS001","P")));
     }
     @Test void getReturnsAccount() {
-        BankAccount a=new BankAccount(); a.setAccountId(UUID.randomUUID()); a.setAccountNumber("ACC-1"); a.setApplicationId(UUID.randomUUID()); a.setCustomerId("CUS001"); a.setProductCode("P"); a.setStatus(AccountStatus.ACTIVE); a.setOpenedAt(OffsetDateTime.now(clock));
-        when(repository.findByAccountNumber("ACC-1")).thenReturn(Optional.of(a));
-        assertEquals("ACC-1", new BankAccountService(repository, clock).get("ACC-1").accountNumber());
+        BankAccount a=account("KEY", UUID.randomUUID(), "CUS001", "P"); when(repository.findByAccountNumber(a.getAccountNumber())).thenReturn(Optional.of(a));
+        assertEquals(a.getAccountNumber(), service().get(a.getAccountNumber()).accountNumber());
     }
     @Test void getMissingIsRejected() {
         when(repository.findByAccountNumber("NOPE")).thenReturn(Optional.empty());
-        assertThrows(AccountNotFoundException.class, () -> new BankAccountService(repository, clock).get("NOPE"));
+        assertThrows(AccountNotFoundException.class, () -> service().get("NOPE"));
+    }
+    private BankAccountService service() { return new BankAccountService(repository, clock); }
+    private CreateAccountRequest request(BankAccount a) { return new CreateAccountRequest(a.getApplicationId(), a.getCustomerId(), a.getProductCode()); }
+    private BankAccount account(String key, UUID applicationId, String customerId, String productCode) {
+        BankAccount a=new BankAccount(); a.setAccountId(UUID.randomUUID()); a.setAccountNumber("ACC-1"); a.setApplicationId(applicationId);
+        a.setIdempotencyKey(key); a.setCustomerId(customerId); a.setProductCode(productCode); a.setStatus(AccountStatus.ACTIVE);
+        a.setOpenedAt(OffsetDateTime.now(clock)); return a;
     }
 }

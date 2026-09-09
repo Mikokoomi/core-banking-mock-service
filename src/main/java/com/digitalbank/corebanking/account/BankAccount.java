@@ -18,6 +18,8 @@ public class BankAccount {
     private String accountNumber;
     @Column(name = "application_id", nullable = false, unique = true)
     private UUID applicationId;
+    @Column(name = "idempotency_key", unique = true, length = 200)
+    private String idempotencyKey;
     @Column(name = "customer_id", nullable = false, length = 100)
     private String customerId;
     @Column(name = "product_code", nullable = false, length = 50)
